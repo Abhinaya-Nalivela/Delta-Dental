@@ -453,27 +453,6 @@
     };
   }
 
-  function buildMemberEligibility(dentalBenefits, patientInfo) {
-    const p = dentalBenefits?.policyInfo || {};
-    return {
-      memberId: p.id || null,
-      relationToSubscriber: p.relationship || null,
-      subscriberName: null,
-      patientName: p.name || patientInfo?.patientName || null,
-      patientDob: null,
-      subscriberDob: null,
-      ssn: null,
-      groupName: p.groupName || null,
-      groupNumber: p.groupNumber || null,
-      patientEffectiveDate: p.effectiveDate || null,
-      patientTerminationDate: p.terminationDate || null,
-      providerNetworkStatus: p.coverage || null,
-      benefitPlanName: p.benefitPlanName || null,
-      product: p.product || null,
-      status: p.status || null
-    };
-  }
-
   function buildProcedureMap(limitations, coverage, claims, history) {
     const out = {};
     Object.entries(PROCEDURE_TARGETS).forEach(([code, label]) => {
@@ -552,7 +531,6 @@
       claims: null,
       treatmentPlans: null,
       patientHistory: null,
-      memberEligibility: null,
       coverageAndMaximums: null,
       orthodontics: null,
       completePlanProvisionsInfo: null,
@@ -595,7 +573,6 @@
       }
     }
 
-    result.memberEligibility = buildMemberEligibility(result.dentalBenefits, patientInfo);
     result.coverageAndMaximums = deriveCoverageAndMaximums(result.dentalBenefits, result.coverage);
     result.orthodontics = {
       orthodonticDeductible: result.coverageAndMaximums.orthodonticDeductible,
