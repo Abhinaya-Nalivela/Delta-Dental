@@ -2,7 +2,7 @@
   const ALLOWED_HOSTS = ['deltadentalco.com', 'deltadental.com', 'deltadentalins.com'];
   if (!ALLOWED_HOSTS.some(h => window.location.hostname.includes(h))) return;
 
-  const WAIT_MS = 12000;
+  const WAIT_MS = 20000;
 
   const PROCEDURE_TARGETS = {
     D0120: 'Periodic Exam',
@@ -64,11 +64,19 @@
   }
 
   function q(selector, root = document) {
-    return root.querySelector(selector);
+    try {
+      return root?.querySelector?.(selector) || null;
+    } catch {
+      return null;
+    }
   }
 
   function qa(selector, root = document) {
-    return Array.from(root.querySelectorAll(selector));
+    try {
+      return Array.from(root?.querySelectorAll?.(selector) || []);
+    } catch {
+      return [];
+    }
   }
 
   function safeText(selector, root = document) {
@@ -102,21 +110,24 @@
     return null;
   }
 
-  async function waitForContent(selector, timeout = WAIT_MS) {
-    if (document.querySelector(selector)) return true;
+  async function waitForContent(selector, timeout = WAIT_MS, root = document) {
+    if (q(selector, root)) return true;
 
     return new Promise((resolve, reject) => {
       const observer = new MutationObserver(() => {
-        if (document.querySelector(selector)) {
+        if (q(selector, root)) {
           observer.disconnect();
           resolve(true);
         }
       });
 
-      observer.observe(document.body || document.documentElement, {
-        childList: true,
-        subtree: true
-      });
+      const observeRoot = root === document ? (document.body || document.documentElement) : root;
+      if (!observeRoot) {
+        reject(new Error(`No root available while waiting for ${selector}`));
+        return;
+      }
+
+      observer.observe(observeRoot, { childList: true, subtree: true });
 
       setTimeout(() => {
         observer.disconnect();
@@ -125,12 +136,50 @@
     });
   }
 
-  async function clickMainTab(tabName) {
-    const candidates = qa('a, button, [role="tab"], .mdc-tab');
+  function scrapePatientInfo(root = document) {
+    const name = safeText('mat-card-content .header h1', root) || safeText('.header h1', root);
+    const urlMatch = window.location.pathname.match(
+      /(?:dental-benefits|limitations|coverage|claims|treatment-plans|history)\/([^/]+)/
+    );
+
+    return {
+      patientName: name || null,
+      subscriberIdFromUrl: urlMatch?.[1] || null,
+      pageTitle: document.title || null
+    };
+  }
+
+  function getPatientRoot() {
+    const patientInfo = scrapePatientInfo(document);
+    const patientName = patientInfo?.patientName;
+    const candidates = qa('mat-card, .mat-mdc-card, .patient-card, .member-card, .content-container, section, div');
+
+    const scored = candidates
+      .map(el => {
+        const t = text(el.textContent || '');
+        let score = 0;
+        if (patientName && t.includes(patientName)) score += 5;
+        if (t.includes('Dental Benefits')) score += 2;
+        if (t.includes('Limitations')) score += 2;
+        if (t.includes('Coverage')) score += 2;
+        if (t.includes('Claims')) score += 2;
+        if (t.includes('Treatment Plans')) score += 2;
+        if (t.includes('Patient History')) score += 2;
+        if (q('ks-patient-dental-benefits, ks-patient-limitations, ks-patient-coverage, ks-patient-claims, ks-treatment-plans, app-history', el)) score += 4;
+        return { el, score };
+      })
+      .filter(x => x.score >= 6)
+      .sort((a, b) => b.score - a.score);
+
+    return scored[0]?.el || document;
+  }
+
+  async function clickMainTab(tabName, root = document) {
+    const candidates = qa('a, button, [role="tab"], .mdc-tab', root);
     const target = candidates.find(el => text(el.textContent).toLowerCase() === tabName.toLowerCase());
     if (!target) return false;
     target.click();
-    await sleep(1200);
+    await sleep(1500);
     return true;
   }
 
@@ -141,19 +190,6 @@
     target.click();
     await sleep(1200);
     return true;
-  }
-
-  function scrapePatientInfo() {
-    const name = safeText('mat-card-content .header h1') || safeText('.header h1');
-    const urlMatch = window.location.pathname.match(
-      /(?:dental-benefits|limitations|coverage|claims|treatment-plans|history)\/([^/]+)/
-    );
-
-    return {
-      patientName: name || null,
-      subscriberIdFromUrl: urlMatch?.[1] || null,
-      pageTitle: document.title || null
-    };
   }
 
   function scrapePolicyInfo(root = document) {
@@ -199,14 +235,11 @@
     }).filter(Boolean);
   }
 
-  function scrapeProceduresTable(containerSelector) {
-    const root = containerSelector ? q(containerSelector) : document;
-    if (!root) return [];
-
-    return qa('ks-common-procedures table tbody tr', root).map(row => {
+  function scrapeProceduresTable(root = document) {
+    const scope = q('ks-common-procedures', root) || root;
+    return qa('table tbody tr', scope).map(row => {
       const cols = row.querySelectorAll('td');
       if (!cols.length) return null;
-
       return {
         additionalLimits: !!cols[1]?.querySelector('.addition-limit-req'),
         type: text(cols[2]?.textContent || '') || null,
@@ -218,37 +251,36 @@
     }).filter(r => r && r.type);
   }
 
-  function scrapeDentalBenefitsTab() {
-    const root = q('ks-patient-dental-benefits');
-    if (!root) return { error: 'Dental Benefits tab not found' };
+  function scrapeDentalBenefitsTab(root = document) {
+    const scope = q('ks-patient-dental-benefits', root);
+    if (!scope) return { error: 'Dental Benefits tab not found' };
 
     return {
-      benefitPeriod: safeText('.dental-benefits > div h3', root) || null,
-      policyInfo: scrapePolicyInfo(root),
-      cleanings: scrapeCleanings(root),
-      benefits: scrapeBenefits(root),
-      commonProcedures: scrapeProceduresTable('ks-patient-dental-benefits'),
-      maximumsApplyText: safeText('.max-apply-text', root) || null,
-      fullBenefitsLinkText: safeText('.tooltip-text a', root) || null,
-      frequenciesAndLimitsLinkText: safeText('.procedures ks-link-with-icon .link-copy', root) || null
+      benefitPeriod: safeText('.dental-benefits > div h3', scope) || null,
+      policyInfo: scrapePolicyInfo(scope),
+      cleanings: scrapeCleanings(scope),
+      benefits: scrapeBenefits(scope),
+      commonProcedures: scrapeProceduresTable(scope),
+      maximumsApplyText: safeText('.max-apply-text', scope) || null,
+      fullBenefitsLinkText: safeText('.tooltip-text a', scope) || null,
+      frequenciesAndLimitsLinkText: safeText('.procedures ks-link-with-icon .link-copy', scope) || null
     };
   }
 
-  function scrapeLimitationsTab() {
-    const root = q('ks-patient-limitations');
-    if (!root) return { error: 'Limitations tab not found' };
+  function scrapeLimitationsTab(root = document) {
+    const scope = q('ks-patient-limitations', root);
+    if (!scope) return { error: 'Limitations tab not found' };
 
     return {
-      note: safeText('.additional-info', root) || null,
-      procedures: scrapeProceduresTable('ks-patient-limitations')
+      note: safeText('.additional-info', scope) || null,
+      procedures: scrapeProceduresTable(scope)
     };
   }
 
   function extractCoverageRows(scope, networkName) {
-    const rows = qa('table tbody tr', scope).map(row => {
+    return qa('table tbody tr', scope).map(row => {
       const cols = row.querySelectorAll('td');
       if (cols.length < 6) return null;
-
       return {
         network: networkName,
         benefitClass: text(cols[1]?.textContent || '') || null,
@@ -258,49 +290,41 @@
         eligibleForBenefitClass: text(cols[5]?.textContent || '') || null
       };
     }).filter(Boolean);
-
-    return rows;
   }
 
-  async function scrapeCoverageTab() {
-    const root = q('ks-patient-coverage');
-    if (!root) return { error: 'Coverage tab not found' };
+  async function scrapeCoverageTab(root = document) {
+    const scope = q('ks-patient-coverage', root);
+    if (!scope) return { error: 'Coverage tab not found' };
 
     const result = {
-      providerSelection: safeText('#mat-select-value-13', root) || null,
-      helpText: safeText('.info-block .message', root) || null,
-      alertText: safeText('.copy-container', root) || null,
+      providerSelection: safeText('[id^="mat-select-value-"]', scope) || null,
+      helpText: safeText('.info-block .message', scope) || null,
+      alertText: safeText('.copy-container', scope) || null,
       networks: []
     };
 
     const subTabs = ['PPO', 'Premier', 'Out of Network'];
-
     for (const sub of subTabs) {
-      const clicked = await clickCoverageSubTab(sub, root);
+      const clicked = await clickCoverageSubTab(sub, scope);
       if (!clicked) continue;
-
-      const activePanel =
-        q('.mat-mdc-tab-body-active', root) ||
-        q('mat-tab-body.mat-mdc-tab-body-active', root) ||
-        root;
-
+      const activePanel = q('.mat-mdc-tab-body-active', scope) || q('mat-tab-body.mat-mdc-tab-body-active', scope) || scope;
       const rows = extractCoverageRows(activePanel, sub);
       result.networks.push({ network: sub, rows });
     }
 
     if (!result.networks.length) {
-      const fallbackRows = extractCoverageRows(root, 'Unknown');
+      const fallbackRows = extractCoverageRows(scope, 'Unknown');
       result.networks.push({ network: 'Unknown', rows: fallbackRows });
     }
 
     return result;
   }
 
-  function scrapeClaimsTab() {
-    const root = q('ks-patient-claims');
-    if (!root) return { error: 'Claims tab not found' };
+  function scrapeClaimsTab(root = document) {
+    const scope = q('ks-patient-claims', root);
+    if (!scope) return { error: 'Patient Claims tab not found' };
 
-    const claims = qa('ks-claim-detail', root).map(card => {
+    const claims = qa('ks-claim-detail', scope).map(card => {
       const infoRows = qa('.claim-info .info-row', card);
       const lineOne = infoRows[0];
       const lineTwo = infoRows[1];
@@ -324,7 +348,6 @@
 
         const tds = tr.querySelectorAll('td');
         if (tds.length < 5) return null;
-
         return {
           rowType: 'item',
           date: text(tds[0]?.textContent || '') || null,
@@ -346,39 +369,32 @@
     });
 
     return {
-      dateInputs: qa('input.dateInput', root).map(el => ({
-        id: el.id || null,
-        value: el.value || null
-      })),
+      dateInputs: qa('input.dateInput', scope).map(el => ({ id: el.id || null, value: el.value || null })),
       claims,
-      paginatorText: safeText('.mat-mdc-paginator-range-label', root) || null
+      paginatorText: safeText('.mat-mdc-paginator-range-label', scope) || null
     };
   }
 
-  function scrapeTreatmentPlansTab() {
-    const root = q('ks-treatment-plans');
-    if (!root) return { error: 'Treatment Plans tab not found' };
+  function scrapeTreatmentPlansTab(root = document) {
+    const scope = q('ks-treatment-plans', root);
+    if (!scope) return { error: 'Treatment Plans tab not found' };
 
-    const emptyMessage = safeText('.no-claims-found.error-container', root) || null;
-    const rows = qa('table tbody tr', root).map(tr => {
+    const emptyMessage = safeText('.no-claims-found.error-container', scope) || null;
+    const rows = qa('table tbody tr', scope).map(tr => {
       const tds = qa('td', tr).map(td => text(td.textContent));
       return tds.length ? tds : null;
     }).filter(Boolean);
 
-    return {
-      emptyMessage,
-      rows
-    };
+    return { emptyMessage, rows };
   }
 
-  function scrapePatientHistoryTab() {
-    const root = q('app-history');
-    if (!root) return { error: 'Patient History tab not found' };
+  function scrapePatientHistoryTab(root = document) {
+    const scope = q('app-history', root);
+    if (!scope) return { error: 'Patient History tab not found' };
 
-    const rows = qa('.patient-history-content mat-row, .patient-history-content .mat-mdc-row', root).map(row => {
+    const rows = qa('.patient-history-content mat-row, .patient-history-content .mat-mdc-row', scope).map(row => {
       const cells = qa('mat-cell, .mat-mdc-cell', row);
       if (cells.length < 6) return null;
-
       return {
         dateOfService: text(cells[0]?.textContent || '') || null,
         code: text(cells[1]?.textContent || '') || null,
@@ -390,33 +406,20 @@
     }).filter(Boolean);
 
     return {
-      dateInputs: qa('input.dateInput', root).map(el => ({
-        id: el.id || null,
-        value: el.value || null
-      })),
+      dateInputs: qa('input.dateInput', scope).map(el => ({ id: el.id || null, value: el.value || null })),
       rows,
-      paginatorText: safeText('.mat-mdc-paginator-range-label', root) || null
+      paginatorText: safeText('.mat-mdc-paginator-range-label', scope) || null
     };
   }
 
   function deriveCoverageAndMaximums(dentalBenefits, coverage) {
     const indicators = dentalBenefits?.benefits || [];
-
-    const findIndicator = parts =>
-      indicators.find(item =>
-        parts.every(p => (item.title || '').toLowerCase().includes(p.toLowerCase()))
-      );
-
+    const findIndicator = parts => indicators.find(item => parts.every(p => (item.title || '').toLowerCase().includes(p.toLowerCase())));
     const individualAnnualDed = findIndicator(['individual', 'annual', 'deductible']);
     const familyAnnualDed = findIndicator(['family', 'annual', 'deductible']);
     const ortho = findIndicator(['orthodontic']);
 
-    const generalBenefitCategories = {
-      preventiveBenefits: null,
-      basicBenefits: null,
-      majorBenefits: null
-    };
-
+    const generalBenefitCategories = { preventiveBenefits: null, basicBenefits: null, majorBenefits: null };
     (coverage?.networks || []).forEach(net => {
       (net.rows || []).forEach(row => {
         const t = (row.benefitClass || '').toLowerCase();
@@ -452,7 +455,6 @@
 
   function buildMemberEligibility(dentalBenefits, patientInfo) {
     const p = dentalBenefits?.policyInfo || {};
-
     return {
       memberId: p.id || null,
       relationToSubscriber: p.relationship || null,
@@ -474,7 +476,6 @@
 
   function buildProcedureMap(limitations, coverage, claims, history) {
     const out = {};
-
     Object.entries(PROCEDURE_TARGETS).forEach(([code, label]) => {
       const limitation = (limitations?.procedures || []).find(row =>
         (row.type || '').toLowerCase().includes(label.toLowerCase()) ||
@@ -515,7 +516,6 @@
       });
 
       const patientHistoryRows = (history?.rows || []).filter(r => r.code === code);
-
       out[code] = {
         label,
         frequency: limitation?.howMany || null,
@@ -528,19 +528,19 @@
         history: [...patientHistoryRows, ...claimHistory]
       };
     });
-
     return out;
   }
 
   async function scrapeAllTabs() {
-    await waitForContent(
-      'ks-patient-dental-benefits, ks-patient-limitations, ks-patient-coverage, ks-patient-claims, ks-treatment-plans, app-history',
-      WAIT_MS
-    );
-
     const warnings = [];
-    const patientInfo = scrapePatientInfo();
+    await waitForContent('body', WAIT_MS);
 
+    const patientRoot = getPatientRoot();
+    if (!patientRoot) {
+      throw new Error('Patient container not found');
+    }
+
+    const patientInfo = scrapePatientInfo(patientRoot);
     const result = {
       pageUrl: window.location.href,
       scrapedAt: new Date().toISOString(),
@@ -565,23 +565,30 @@
     };
 
     const tabs = [
-      { name: 'Dental Benefits', key: 'dentalBenefits', scrape: scrapeDentalBenefitsTab },
-      { name: 'Limitations', key: 'limitations', scrape: scrapeLimitationsTab },
-      { name: 'Coverage', key: 'coverage', scrape: scrapeCoverageTab },
-      { name: 'Claims', key: 'claims', scrape: scrapeClaimsTab },
-      { name: 'Treatment Plans', key: 'treatmentPlans', scrape: scrapeTreatmentPlansTab },
-      { name: 'Patient History', key: 'patientHistory', scrape: scrapePatientHistoryTab }
+      { name: 'Dental Benefits', key: 'dentalBenefits', selector: 'ks-patient-dental-benefits', scrape: scrapeDentalBenefitsTab },
+      { name: 'Limitations', key: 'limitations', selector: 'ks-patient-limitations', scrape: scrapeLimitationsTab },
+      { name: 'Coverage', key: 'coverage', selector: 'ks-patient-coverage', scrape: scrapeCoverageTab },
+      { name: 'Claims', key: 'claims', selector: 'ks-patient-claims', scrape: scrapeClaimsTab },
+      { name: 'Treatment Plans', key: 'treatmentPlans', selector: 'ks-treatment-plans', scrape: scrapeTreatmentPlansTab },
+      { name: 'Patient History', key: 'patientHistory', selector: 'app-history', scrape: scrapePatientHistoryTab }
     ];
 
     for (const tab of tabs) {
-      const clicked = await clickMainTab(tab.name);
+      const clicked = await clickMainTab(tab.name, patientRoot);
       if (!clicked) {
-        warnings.push(`Could not click main tab: ${tab.name}`);
+        warnings.push(`Could not click patient tab: ${tab.name}`);
+        result[tab.key] = { error: `${tab.name} tab not clickable in patient panel` };
+        continue;
       }
-      await sleep(1000);
 
       try {
-        result[tab.key] = await tab.scrape();
+        await waitForContent(tab.selector, WAIT_MS, patientRoot);
+      } catch (err) {
+        warnings.push(`Timed out waiting for ${tab.name}: ${err.message}`);
+      }
+
+      try {
+        result[tab.key] = await tab.scrape(patientRoot);
       } catch (err) {
         result[tab.key] = { error: err.message };
         warnings.push(`Failed scraping ${tab.name}: ${err.message}`);
@@ -597,27 +604,22 @@
       orthodonticMaximumPaidToDate: result.coverageAndMaximums.orthodonticMaximumPaidToDate
     };
     result.completePlanProvisionsInfo = result.dentalBenefits?.fullBenefitsLinkText || null;
-    result.procedures = buildProcedureMap(
-      result.limitations,
-      result.coverage,
-      result.claims,
-      result.patientHistory
-    );
-
+    result.procedures = buildProcedureMap(result.limitations, result.coverage, result.claims, result.patientHistory);
     return result;
   }
 
   function scrapeVisibleOnly() {
+    const patientRoot = getPatientRoot();
     return {
       pageUrl: window.location.href,
       scrapedAt: new Date().toISOString(),
       activeTab: getCurrentPathTab(),
-      patientInfo: scrapePatientInfo(),
-      dentalBenefits: scrapeDentalBenefitsTab(),
-      limitations: scrapeLimitationsTab(),
-      claims: scrapeClaimsTab(),
-      treatmentPlans: scrapeTreatmentPlansTab(),
-      patientHistory: scrapePatientHistoryTab()
+      patientInfo: scrapePatientInfo(patientRoot),
+      dentalBenefits: scrapeDentalBenefitsTab(patientRoot),
+      limitations: scrapeLimitationsTab(patientRoot),
+      claims: scrapeClaimsTab(patientRoot),
+      treatmentPlans: scrapeTreatmentPlansTab(patientRoot),
+      patientHistory: scrapePatientHistoryTab(patientRoot)
     };
   }
 
@@ -637,6 +639,7 @@
     }
 
     if (request.action === 'GET_DELTA_CONTEXT') {
+      const patientRoot = getPatientRoot();
       sendResponse({
         success: true,
         data: {
@@ -644,12 +647,12 @@
           title: document.title,
           hostname: window.location.hostname,
           currentTab: getCurrentPathTab(),
-          hasDentalBenefits: !!q('ks-patient-dental-benefits'),
-          hasLimitations: !!q('ks-patient-limitations'),
-          hasCoverage: !!q('ks-patient-coverage'),
-          hasClaims: !!q('ks-patient-claims'),
-          hasTreatmentPlans: !!q('ks-treatment-plans'),
-          hasPatientHistory: !!q('app-history')
+          hasDentalBenefits: !!q('ks-patient-dental-benefits', patientRoot),
+          hasLimitations: !!q('ks-patient-limitations', patientRoot),
+          hasCoverage: !!q('ks-patient-coverage', patientRoot),
+          hasClaims: !!q('ks-patient-claims', patientRoot),
+          hasTreatmentPlans: !!q('ks-treatment-plans', patientRoot),
+          hasPatientHistory: !!q('app-history', patientRoot)
         }
       });
       return false;
@@ -657,6 +660,7 @@
   });
 
   window.__deltaDentalScraper = {
+    getPatientRoot,
     scrapeAllTabs,
     scrapeVisibleOnly,
     scrapeDentalBenefitsTab,
