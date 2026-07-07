@@ -83,6 +83,14 @@
     return text(q(selector, root)?.textContent || '');
   }
 
+  function chunkArray(items, size) {
+    const chunks = [];
+    for (let i = 0; i < items.length; i += size) {
+      chunks.push(items.slice(i, i + size));
+    }
+    return chunks;
+  }
+
   function normalizeKey(key) {
     return text(key)
       .replace(/[:]/g, '')
@@ -104,9 +112,6 @@
     if (href.includes('/dental-benefits/')) return 'Dental Benefits';
     if (href.includes('/limitations/')) return 'Limitations';
     if (href.includes('/coverage/')) return 'Coverage';
-    if (href.includes('/claims/')) return 'Claims';
-    if (href.includes('/treatment-plans/')) return 'Treatment Plans';
-    if (href.includes('/history/')) return 'Patient History';
     return null;
   }
 
@@ -139,7 +144,7 @@
   function scrapePatientInfo(root = document) {
     const name = safeText('mat-card-content .header h1', root) || safeText('.header h1', root);
     const urlMatch = window.location.pathname.match(
-      /(?:dental-benefits|limitations|coverage|claims|treatment-plans|history)\/([^/]+)/
+      /(?:dental-benefits|limitations|coverage)\/([^/]+)/
     );
 
     return {
@@ -162,10 +167,7 @@
         if (t.includes('Dental Benefits')) score += 2;
         if (t.includes('Limitations')) score += 2;
         if (t.includes('Coverage')) score += 2;
-        if (t.includes('Claims')) score += 2;
-        if (t.includes('Treatment Plans')) score += 2;
-        if (t.includes('Patient History')) score += 2;
-        if (q('ks-patient-dental-benefits, ks-patient-limitations, ks-patient-coverage, ks-patient-claims, ks-treatment-plans, app-history', el)) score += 4;
+        if (q('ks-patient-dental-benefits, ks-patient-limitations, ks-patient-coverage', el)) score += 4;
         return { el, score };
       })
       .filter(x => x.score >= 6)
@@ -189,6 +191,89 @@
     if (!target) return false;
     target.click();
     await sleep(1200);
+    return true;
+  }
+
+  function findButtonByText(label, root = document) {
+    const needle = label.toLowerCase();
+    return qa('button, input[type="button"], input[type="submit"]', root).find(el => {
+      const buttonText = text(el.textContent || el.value || '');
+      return buttonText.toLowerCase() === needle;
+    }) || null;
+  }
+
+  function dispatchInput(el, value) {
+    el.focus();
+    el.value = value;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  async function selectCoverageProvider(scope) {
+    const currentProvider = safeText('[id^="mat-select-value-"]', scope) || safeText('.mat-mdc-select-value', scope);
+    if (currentProvider) return currentProvider;
+
+    const providerSelect = q('mat-select, .mat-mdc-select, [role="combobox"]', scope);
+    if (!providerSelect) return null;
+
+    providerSelect.click();
+    await sleep(800);
+
+    const option = qa('mat-option, .mat-mdc-option, [role="option"]', document)
+      .find(el => !el.hasAttribute('aria-disabled') && text(el.textContent));
+    if (!option) return currentProvider || null;
+
+    option.click();
+    await sleep(1200);
+    return safeText('[id^="mat-select-value-"]', scope) || safeText('.mat-mdc-select-value', scope) || text(option.textContent);
+  }
+
+  async function clearCoverageCodeSearch(scope) {
+    const clearButton = findButtonByText('Clear', scope);
+    if (clearButton) {
+      clearButton.click();
+      await sleep(800);
+      return true;
+    }
+
+    qa('mat-chip button, mat-chip .mat-mdc-chip-remove, .mat-mdc-chip button', scope).forEach(button => button.click());
+    const input = findCoverageCodeInput(scope);
+    if (input) dispatchInput(input, '');
+    await sleep(500);
+    return false;
+  }
+
+  function findCoverageCodeInput(scope) {
+    const inputs = qa('input', scope).filter(el => {
+      const descriptor = `${el.placeholder || ''} ${el.getAttribute('aria-label') || ''} ${el.id || ''} ${el.name || ''}`.toLowerCase();
+      return !el.disabled && el.type !== 'hidden' && !descriptor.includes('date') && !descriptor.includes('provider');
+    });
+
+    return inputs.find(el => {
+      const descriptor = `${el.placeholder || ''} ${el.getAttribute('aria-label') || ''} ${el.id || ''} ${el.name || ''}`.toLowerCase();
+      return descriptor.includes('code') || el.closest('mat-chip-grid, mat-chip-list, .mat-mdc-chip-set, .mat-chip-list');
+    }) || inputs[0] || null;
+  }
+
+  async function typeCoverageProcedureCodes(scope, codes) {
+    const input = findCoverageCodeInput(scope);
+    if (!input) return false;
+
+    for (const code of codes) {
+      dispatchInput(input, code);
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', code: 'Tab', keyCode: 9, which: 9, bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Tab', code: 'Tab', keyCode: 9, which: 9, bubbles: true }));
+      await sleep(250);
+    }
+
+    return true;
+  }
+
+  async function searchCoverageCodes(scope) {
+    const searchButton = findButtonByText('Search', scope);
+    if (!searchButton) return false;
+    searchButton.click();
+    await sleep(1800);
     return true;
   }
 
@@ -292,124 +377,147 @@
     }).filter(Boolean);
   }
 
+  function extractCoverageDetailValue(raw, label, labels) {
+    const normalized = text(raw).replace(/[’]/g, "'");
+    const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/'/g, "['’]");
+    const otherLabels = labels
+      .filter(item => item !== label)
+      .map(item => item.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/'/g, "['’]"))
+      .join('|');
+    const regex = new RegExp(`${escapedLabel}\\s*([\\s\\S]*?)(?=${otherLabels ? `\\s+(?:${otherLabels})\\s+` : '$'}|$)`, 'i');
+    return text(normalized.match(regex)?.[1] || '') || null;
+  }
+
+  function parseCoverageProcedureDetail(raw, code, networkName) {
+    const labels = [
+      'Benefit Class',
+      'Age Limit',
+      'Member Frequency Limitation',
+      'Copay',
+      "Member's Copay",
+      'Deductible Waived',
+      'Eligibility Class',
+      'Benefit Note',
+      'History'
+    ];
+    const title = text(raw.match(new RegExp(`${code}\\s*-\\s*([^\\n]+?)(?=\\s+Benefit Class|$)`, 'i'))?.[0] || '');
+
+    return {
+      code,
+      network: networkName,
+      title: title || null,
+      benefitClass: extractCoverageDetailValue(raw, 'Benefit Class', labels),
+      ageLimit: extractCoverageDetailValue(raw, 'Age Limit', labels),
+      memberFrequencyLimitation: extractCoverageDetailValue(raw, 'Member Frequency Limitation', labels),
+      copay: extractCoverageDetailValue(raw, 'Copay', labels),
+      memberCopay: extractCoverageDetailValue(raw, "Member's Copay", labels),
+      deductibleWaived: extractCoverageDetailValue(raw, 'Deductible Waived', labels),
+      eligibilityClass: extractCoverageDetailValue(raw, 'Eligibility Class', labels),
+      benefitNote: extractCoverageDetailValue(raw, 'Benefit Note', labels)
+    };
+  }
+
+  function getCoverageDetailContainer(scope, code) {
+    const header = qa('mat-expansion-panel-header, .mat-expansion-panel-header, button, [role="button"]', scope)
+      .find(el => text(el.textContent || '').includes(code));
+    const panel = header?.closest?.('mat-expansion-panel, .mat-expansion-panel');
+    if (panel && /Benefit Class|Copay|Deductible Waived|Eligibility Class/i.test(text(panel.textContent || ''))) {
+      return panel;
+    }
+
+    return qa('mat-expansion-panel, .mat-expansion-panel, mat-accordion > *, .mat-accordion > *, [role="region"], tr, div', scope)
+      .filter(el => {
+        const t = text(el.textContent || '');
+        return t.includes(code) && /Benefit Class|Copay|Deductible Waived|Eligibility Class/i.test(t);
+      })
+      .sort((a, b) => text(a.textContent || '').length - text(b.textContent || '').length)[0] || null;
+  }
+
+  async function expandCoverageProcedureDetails(scope, codes) {
+    const triggers = qa('mat-expansion-panel-header, .mat-expansion-panel-header, button, [role="button"]', scope)
+      .filter(el => {
+        const t = text(el.textContent || '');
+        return codes.some(code => t.includes(code));
+      });
+
+    for (const trigger of triggers) {
+      const expanded = trigger.getAttribute('aria-expanded');
+      if (expanded !== 'true') {
+        trigger.click();
+        await sleep(250);
+      }
+    }
+  }
+
+  async function scrapeCoverageProcedureDetails(scope, codes, networkName) {
+    await expandCoverageProcedureDetails(scope, codes);
+
+    return codes.map(code => {
+      const container = getCoverageDetailContainer(scope, code);
+      if (!container) {
+        return {
+          code,
+          network: networkName,
+          error: 'Procedure detail not found'
+        };
+      }
+
+      return parseCoverageProcedureDetail(container.textContent || '', code, networkName);
+    });
+  }
+
   async function scrapeCoverageTab(root = document) {
     const scope = q('ks-patient-coverage', root);
     if (!scope) return { error: 'Coverage tab not found' };
 
     const result = {
-      providerSelection: safeText('[id^="mat-select-value-"]', scope) || null,
+      providerSelection: null,
       helpText: safeText('.info-block .message', scope) || null,
       alertText: safeText('.copy-container', scope) || null,
-      networks: []
+      networks: [],
+      procedureSearchBatches: [],
+      procedureDetails: []
     };
 
-    const subTabs = ['PPO', 'Premier', 'Out of Network'];
-    for (const sub of subTabs) {
-      const clicked = await clickCoverageSubTab(sub, scope);
-      if (!clicked) continue;
+    result.providerSelection = await selectCoverageProvider(scope);
+
+    const clicked = await clickCoverageSubTab('PPO', scope);
+    if (clicked) {
       const activePanel = q('.mat-mdc-tab-body-active', scope) || q('mat-tab-body.mat-mdc-tab-body-active', scope) || scope;
-      const rows = extractCoverageRows(activePanel, sub);
-      result.networks.push({ network: sub, rows });
+      const rows = extractCoverageRows(activePanel, 'PPO');
+      result.networks.push({ network: 'PPO', rows });
     }
 
     if (!result.networks.length) {
-      const fallbackRows = extractCoverageRows(scope, 'Unknown');
-      result.networks.push({ network: 'Unknown', rows: fallbackRows });
+      const fallbackRows = extractCoverageRows(scope, 'PPO');
+      result.networks.push({ network: 'PPO', rows: fallbackRows });
+    }
+
+    const procedureCodes = Object.keys(PROCEDURE_TARGETS);
+    const batches = chunkArray(procedureCodes, 5);
+    for (const batch of batches) {
+      await clearCoverageCodeSearch(scope);
+      const typed = await typeCoverageProcedureCodes(scope, batch);
+      const searched = typed ? await searchCoverageCodes(scope) : false;
+      await clickCoverageSubTab('PPO', scope);
+
+      const activePanel = q('.mat-mdc-tab-body-active', scope) || q('mat-tab-body.mat-mdc-tab-body-active', scope) || scope;
+      const rows = extractCoverageRows(activePanel, 'PPO');
+      const procedureDetails = searched ? await scrapeCoverageProcedureDetails(scope, batch, 'PPO') : [];
+
+      result.procedureSearchBatches.push({
+        codes: batch,
+        providerSelection: safeText('[id^="mat-select-value-"]', scope) || result.providerSelection,
+        typed,
+        searched,
+        network: 'PPO',
+        rows,
+        procedureDetails
+      });
+      result.procedureDetails.push(...procedureDetails);
     }
 
     return result;
-  }
-
-  function scrapeClaimsTab(root = document) {
-    const scope = q('ks-patient-claims', root);
-    if (!scope) return { error: 'Patient Claims tab not found' };
-
-    const claims = qa('ks-claim-detail', scope).map(card => {
-      const infoRows = qa('.claim-info .info-row', card);
-      const lineOne = infoRows[0];
-      const lineTwo = infoRows[1];
-
-      const providerValues = qa('.info-value', lineTwo || card)
-        .map(el => text(el.textContent))
-        .filter(Boolean);
-
-      const claimNumberText = text(lineOne?.querySelector('.claim-number')?.textContent || '');
-      const claimStatus = text(lineOne?.querySelector('.status')?.textContent || '');
-
-      const lineItems = qa('.claim-line-items tbody tr', card).map(tr => {
-        if (tr.classList.contains('total')) {
-          const tds = tr.querySelectorAll('td');
-          return {
-            rowType: 'total',
-            totalWePay: text(tds[1]?.textContent || '') || null,
-            totalPatientPays: text(tds[2]?.textContent || '') || null
-          };
-        }
-
-        const tds = tr.querySelectorAll('td');
-        if (tds.length < 5) return null;
-        return {
-          rowType: 'item',
-          date: text(tds[0]?.textContent || '') || null,
-          code: text(tds[1]?.textContent || '') || null,
-          procedure: text(tds[2]?.textContent || '') || null,
-          wePay: text(tds[3]?.textContent || '') || null,
-          patientPays: text(tds[4]?.textContent || '') || null
-        };
-      }).filter(Boolean);
-
-      return {
-        claimNumber: claimNumberText || null,
-        claimStatus: claimStatus || null,
-        providerName: providerValues[0] || null,
-        providerAddressLine1: providerValues[1] || null,
-        providerAddressLine2: providerValues[2] || null,
-        lineItems
-      };
-    });
-
-    return {
-      dateInputs: qa('input.dateInput', scope).map(el => ({ id: el.id || null, value: el.value || null })),
-      claims,
-      paginatorText: safeText('.mat-mdc-paginator-range-label', scope) || null
-    };
-  }
-
-  function scrapeTreatmentPlansTab(root = document) {
-    const scope = q('ks-treatment-plans', root);
-    if (!scope) return { error: 'Treatment Plans tab not found' };
-
-    const emptyMessage = safeText('.no-claims-found.error-container', scope) || null;
-    const rows = qa('table tbody tr', scope).map(tr => {
-      const tds = qa('td', tr).map(td => text(td.textContent));
-      return tds.length ? tds : null;
-    }).filter(Boolean);
-
-    return { emptyMessage, rows };
-  }
-
-  function scrapePatientHistoryTab(root = document) {
-    const scope = q('app-history', root);
-    if (!scope) return { error: 'Patient History tab not found' };
-
-    const rows = qa('.patient-history-content mat-row, .patient-history-content .mat-mdc-row', scope).map(row => {
-      const cells = qa('mat-cell, .mat-mdc-cell', row);
-      if (cells.length < 6) return null;
-      return {
-        dateOfService: text(cells[0]?.textContent || '') || null,
-        code: text(cells[1]?.textContent || '') || null,
-        procedureDesc: text(cells[2]?.textContent || '') || null,
-        tooth: text(cells[3]?.textContent || '') || null,
-        surface: text(cells[4]?.textContent || '') || null,
-        area: text(cells[5]?.textContent || '') || null
-      };
-    }).filter(Boolean);
-
-    return {
-      dateInputs: qa('input.dateInput', scope).map(el => ({ id: el.id || null, value: el.value || null })),
-      rows,
-      paginatorText: safeText('.mat-mdc-paginator-range-label', scope) || null
-    };
   }
 
   function deriveCoverageAndMaximums(dentalBenefits, coverage) {
@@ -453,7 +561,7 @@
     };
   }
 
-  function buildProcedureMap(limitations, coverage, claims, history) {
+  function buildProcedureMap(limitations, coverage) {
     const out = {};
     Object.entries(PROCEDURE_TARGETS).forEach(([code, label]) => {
       const limitation = (limitations?.procedures || []).find(row =>
@@ -462,6 +570,24 @@
       );
 
       const coverageMatches = [];
+      (coverage?.procedureDetails || []).forEach(detail => {
+        if (detail.code === code && !detail.error) {
+          coverageMatches.push({
+            network: detail.network,
+            benefitClass: detail.benefitClass,
+            coveragePercentage: detail.copay,
+            deductible: detail.deductibleWaived,
+            coverageDetails: detail.eligibilityClass,
+            waitingPeriod: detail.eligibilityClass,
+            ageLimit: detail.ageLimit,
+            memberFrequencyLimitation: detail.memberFrequencyLimitation,
+            memberCopay: detail.memberCopay,
+            benefitNote: detail.benefitNote,
+            title: detail.title
+          });
+        }
+      });
+
       (coverage?.networks || []).forEach(net => {
         (net.rows || []).forEach(row => {
           const hay = `${row.benefitClass || ''}`.toLowerCase();
@@ -478,33 +604,16 @@
         });
       });
 
-      const claimHistory = [];
-      (claims?.claims || []).forEach(claim => {
-        (claim.lineItems || []).forEach(item => {
-          if (item.rowType === 'item' && item.code === code) {
-            claimHistory.push({
-              claimNumber: claim.claimNumber,
-              claimStatus: claim.claimStatus,
-              date: item.date,
-              procedure: item.procedure,
-              wePay: item.wePay,
-              patientPays: item.patientPays
-            });
-          }
-        });
-      });
-
-      const patientHistoryRows = (history?.rows || []).filter(r => r.code === code);
       out[code] = {
         label,
-        frequency: limitation?.howMany || null,
+        frequency: coverageMatches[0]?.memberFrequencyLimitation || limitation?.howMany || null,
         coveragePercentage: coverageMatches[0]?.coveragePercentage || null,
         deductible: coverageMatches[0]?.deductible || null,
         coverageDetails: coverageMatches,
-        ageLimit: limitation?.ageLimit || null,
+        ageLimit: coverageMatches[0]?.ageLimit || limitation?.ageLimit || null,
         nextAvailable: limitation?.nextAvailable || null,
         remaining: limitation?.remaining || null,
-        history: [...patientHistoryRows, ...claimHistory]
+        history: []
       };
     });
     return out;
@@ -528,9 +637,6 @@
       dentalBenefits: null,
       limitations: null,
       coverage: null,
-      claims: null,
-      treatmentPlans: null,
-      patientHistory: null,
       coverageAndMaximums: null,
       orthodontics: null,
       completePlanProvisionsInfo: null,
@@ -545,10 +651,7 @@
     const tabs = [
       { name: 'Dental Benefits', key: 'dentalBenefits', selector: 'ks-patient-dental-benefits', scrape: scrapeDentalBenefitsTab },
       { name: 'Limitations', key: 'limitations', selector: 'ks-patient-limitations', scrape: scrapeLimitationsTab },
-      { name: 'Coverage', key: 'coverage', selector: 'ks-patient-coverage', scrape: scrapeCoverageTab },
-      { name: 'Claims', key: 'claims', selector: 'ks-patient-claims', scrape: scrapeClaimsTab },
-      { name: 'Treatment Plans', key: 'treatmentPlans', selector: 'ks-treatment-plans', scrape: scrapeTreatmentPlansTab },
-      { name: 'Patient History', key: 'patientHistory', selector: 'app-history', scrape: scrapePatientHistoryTab }
+      { name: 'Coverage', key: 'coverage', selector: 'ks-patient-coverage', scrape: scrapeCoverageTab }
     ];
 
     for (const tab of tabs) {
@@ -581,11 +684,11 @@
       orthodonticMaximumPaidToDate: result.coverageAndMaximums.orthodonticMaximumPaidToDate
     };
     result.completePlanProvisionsInfo = result.dentalBenefits?.fullBenefitsLinkText || null;
-    result.procedures = buildProcedureMap(result.limitations, result.coverage, result.claims, result.patientHistory);
+    result.procedures = buildProcedureMap(result.limitations, result.coverage);
     return result;
   }
 
-  function scrapeVisibleOnly() {
+  async function scrapeVisibleOnly() {
     const patientRoot = getPatientRoot();
     return {
       pageUrl: window.location.href,
@@ -594,9 +697,7 @@
       patientInfo: scrapePatientInfo(patientRoot),
       dentalBenefits: scrapeDentalBenefitsTab(patientRoot),
       limitations: scrapeLimitationsTab(patientRoot),
-      claims: scrapeClaimsTab(patientRoot),
-      treatmentPlans: scrapeTreatmentPlansTab(patientRoot),
-      patientHistory: scrapePatientHistoryTab(patientRoot)
+      coverage: await scrapeCoverageTab(patientRoot)
     };
   }
 
@@ -626,10 +727,7 @@
           currentTab: getCurrentPathTab(),
           hasDentalBenefits: !!q('ks-patient-dental-benefits', patientRoot),
           hasLimitations: !!q('ks-patient-limitations', patientRoot),
-          hasCoverage: !!q('ks-patient-coverage', patientRoot),
-          hasClaims: !!q('ks-patient-claims', patientRoot),
-          hasTreatmentPlans: !!q('ks-treatment-plans', patientRoot),
-          hasPatientHistory: !!q('app-history', patientRoot)
+          hasCoverage: !!q('ks-patient-coverage', patientRoot)
         }
       });
       return false;
@@ -642,9 +740,6 @@
     scrapeVisibleOnly,
     scrapeDentalBenefitsTab,
     scrapeLimitationsTab,
-    scrapeCoverageTab,
-    scrapeClaimsTab,
-    scrapeTreatmentPlansTab,
-    scrapePatientHistoryTab
+    scrapeCoverageTab
   };
 })();
